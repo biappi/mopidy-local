@@ -5,6 +5,8 @@ import shutil
 import sqlite3
 import struct
 
+from mopidy.models import Album, Track
+
 import uritools
 
 from . import Extension, schema, translator
@@ -28,13 +30,21 @@ def get_image_size_gif(data):
     return struct.unpack("<HH", data[6:10])
 
 
-def model_uri(kind, model):
-    if kind == "album":
-        # ignore num_tracks for multi-disc albums
-        digest = hashlib.md5(str(model.replace(num_tracks=None)).encode())  # noqa: S324
-    else:
-        digest = hashlib.md5(str(model).encode())  # noqa: S324
-    return f"local:{kind}:md5:{digest.hexdigest()}"
+def album_uri(model, lax_arist_match: bool):
+    # ignore num_tracks for multi-disc albums
+    model = model.replace(num_tracks=None)
+    if lax_arist_match:
+        model = Album(
+            name=model.name,
+            artists=model.artists,
+        )
+    digest = hashlib.md5(str(model).encode())  # noqa: S324
+    return f"local:album:md5:{digest.hexdigest()}"
+
+
+def artist_uri(model):
+    digest = hashlib.md5(str(model).encode())  # noqa: S324
+    return f"local:artist:md5:{digest.hexdigest()}"
 
 
 def get_image_size_jpeg(data):
@@ -96,10 +106,10 @@ class LocalStorageProvider:
             logger.debug("Using SQLite database schema v%s", version)
             return schema.count_tracks(connection)
 
-    def begin(self):
+    def begin(self) -> list[Track]:
         return schema.tracks(self._connect())
 
-    def add(self, track, tags=None, duration=None):  # noqa: ARG002
+    def add(self, track, lax_album_match: bool, provide_default_album_artists: bool, tags=None, duration=None):  # noqa: ARG002
         logger.debug("Adding track: %s", track)
         images = None
         if track.album and track.album.name:  # TODO: album required
@@ -110,7 +120,7 @@ class LocalStorageProvider:
             except Exception as e:
                 logger.warning("Error extracting images for %s: %s", uri, e)
         try:
-            track = self._validate_track(track)
+            track = self._validate_track(track, lax_album_match, provide_default_album_artists)
             schema.insert_track(self._connect(), track, images)
         except Exception as e:
             logger.warning("Skipped %s: %s", track.uri, e)
@@ -165,18 +175,18 @@ class LocalStorageProvider:
             msg = "Empty artist name"
             raise ValueError(msg)
         if not model.uri:
-            model = model.replace(uri=model_uri("artist", model))
+            model = model.replace(uri=artist_uri(model))
         return model
 
-    def _validate_album(self, model):
+    def _validate_album(self, model, lax_arist_match: bool):
         if not model.name:
             msg = "Empty album name"
             raise ValueError(msg)
         if not model.uri:
-            model = model.replace(uri=model_uri("album", model))
+            model = model.replace(uri=album_uri(model, lax_arist_match))
         return model.replace(artists=list(map(self._validate_artist, model.artists)))
 
-    def _validate_track(self, model):
+    def _validate_track(self, model, lax_album_match: bool, provide_default_album_artists: bool):
         if not model.uri:
             msg = "Empty track URI"
             raise ValueError(msg)
@@ -185,7 +195,10 @@ class LocalStorageProvider:
         else:
             name = translator.local_uri_to_path(model.uri, pathlib.Path()).name
         if model.album and model.album.name:
-            album = self._validate_album(model.album)
+            if provide_default_album_artists and len(model.album.artists) == 0:
+                newalbum = model.album.replace(artists=model.artists)
+                model = model.replace(album=newalbum)
+            album = self._validate_album(model.album, lax_album_match)
         else:
             album = None
         return model.replace(
