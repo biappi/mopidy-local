@@ -271,21 +271,56 @@ def search_tracks(c, query, limit, offset, exact, filters=()):  # noqa: PLR0913,
         sql, params = _indexed_query(query)
     else:
         sql, params = _fulltext_query(query)
+    return _tracks(_execute_search(c, sql, params, limit, offset, filters))
+
+
+def _execute_search(c, sql, params, limit, offset, filters, *, prefix=""):
     clauses = []
     for kwargs in filters:
         f, p = _filters(_SEARCH_FILTERS, **kwargs)
         if f:
-            clauses.append("({})".format(" AND ".join(f)))
+            clauses.append(
+                "({})".format(" AND ".join(f"{prefix}{item}" for item in f))
+            )
             params.extend(p)
         else:
             logger.debug("Skipped SQLite search filter %r", kwargs)
     if clauses:
         sql += " AND ({})".format(" OR ".join(clauses))
-    sql += " LIMIT ? OFFSET ?"
-    params += [limit, offset]
+    if limit is not None:
+        sql += " LIMIT ? OFFSET ?"
+        params += [limit, offset]
     logger.debug("SQLite search query %r: %s", params, sql)
-    rows = c.execute(sql, params)
-    return _tracks(rows)
+    return c.execute(sql, params)
+
+
+def search_tracks_with_expr(c, expr, limit, offset, filters=()):
+    return _tracks(_search_with_expr(c, expr, limit, offset, filters))
+
+
+def search_distinct_with_expr(c, expr, fields, limit, offset, filters=()):
+    if not fields or any(field not in _SEARCH_FIELDS for field in fields):
+        msg = f"Invalid search fields: {fields}"
+        raise LookupError(msg)
+    return [
+        tuple(row)
+        for row in _search_with_expr(c, expr, limit, offset, filters, fields)
+    ]
+
+
+def _search_with_expr(c, expr, limit, offset, filters, fields=None):
+    from mopidy_local.search_expr import compile_search_sql
+
+    sql, params = compile_search_sql(expr, fields)
+    return _execute_search(
+        c,
+        sql,
+        params,
+        limit,
+        offset,
+        filters,
+        prefix="tracks." if fields is not None else "",
+    )
 
 
 def get_image_uris(c):

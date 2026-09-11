@@ -351,3 +351,139 @@ class SchemaTest(unittest.TestCase):
 
         assert len(result) == len(self.tracks) - 1
         assert self.tracks[0].uri not in [track.uri for track in result]
+
+    def test_search_tracks_with_expr_eq(self):
+        from mopidy.query import Compare
+
+        with self.connection as c:
+            tracks = schema.search_tracks_with_expr(
+                c,
+                Compare("track_name", "eq", "track #0"),
+                10,
+                0,
+            )
+        assert [t.uri for t in tracks] == [self.tracks[0].uri]
+
+    def test_search_tracks_with_expr_ne_matches_null_fields(self):
+        from mopidy.query import Compare
+
+        with self.connection as c:
+            tracks = schema.search_tracks_with_expr(
+                c,
+                Compare("genre", "ne", "Rock"),
+                10,
+                0,
+            )
+        uris = {t.uri for t in tracks}
+        assert self.tracks[0].uri not in uris
+        assert {self.tracks[i].uri for i in range(1, 5)} <= uris
+
+    def test_search_tracks_with_expr_contains_is_case_insensitive(self):
+        from mopidy.query import Compare
+
+        with self.connection as c:
+            tracks = schema.search_tracks_with_expr(
+                c,
+                Compare("track_name", "contains", "TRACK #1"),
+                10,
+                0,
+            )
+        assert [t.uri for t in tracks] == [self.tracks[1].uri]
+
+    def test_search_tracks_with_expr_starts_with(self):
+        from mopidy.query import Compare
+
+        with self.connection as c:
+            tracks = schema.search_tracks_with_expr(
+                c,
+                Compare("track_name", "starts_with", "track #2"),
+                10,
+                0,
+            )
+        assert [t.uri for t in tracks] == [self.tracks[2].uri]
+
+    def test_search_tracks_with_expr_any_contains(self):
+        from mopidy.query import Compare
+
+        with self.connection as c:
+            tracks = schema.search_tracks_with_expr(
+                c,
+                Compare("any", "contains", "rock"),
+                10,
+                0,
+            )
+        assert [t.uri for t in tracks] == [self.tracks[0].uri]
+
+    def test_search_tracks_with_expr_and_not(self):
+        from mopidy.query import And, Compare, Not
+
+        expr = And(
+            (
+                Compare("track_name", "contains", "track"),
+                Not(Compare("genre", "eq", "Rock")),
+            )
+        )
+        with self.connection as c:
+            tracks = schema.search_tracks_with_expr(c, expr, 10, 0)
+        uris = {t.uri for t in tracks}
+        assert self.tracks[0].uri not in uris
+        assert self.tracks[1].uri in uris
+
+    def test_search_tracks_with_expr_match_all(self):
+        from mopidy.query import MatchAll
+
+        with self.connection as c:
+            tracks = schema.search_tracks_with_expr(c, MatchAll(), 10, 0)
+        assert {t.uri for t in tracks} == {t.uri for t in self.tracks}
+
+    def test_search_tracks_with_expr_without_limit(self):
+        from mopidy.query import MatchAll
+
+        with self.connection as c:
+            tracks = schema.search_tracks_with_expr(c, MatchAll(), None, 0)
+        assert {t.uri for t in tracks} == {t.uri for t in self.tracks}
+
+    def test_search_distinct_with_expr(self):
+        from mopidy.query import MatchAll
+
+        with self.connection as c:
+            values = schema.search_distinct_with_expr(
+                c, MatchAll(), ("genre",), 10, 0
+            )
+
+        assert values == [("Rock",)]
+
+    def test_search_distinct_with_expr_without_limit(self):
+        from mopidy.query import MatchAll
+
+        with self.connection as c:
+            values = schema.search_distinct_with_expr(
+                c, MatchAll(), ("track_name",), None, 0
+            )
+
+        assert {value for (value,) in values} == {
+            track.name for track in self.tracks
+        }
+
+    def test_search_tracks_with_expr_like_metacharacters_are_literal(self):
+        from mopidy.query import Compare
+
+        with self.connection as c:
+            tracks = schema.search_tracks_with_expr(
+                c,
+                Compare("track_name", "contains", "track%"),
+                10,
+                0,
+            )
+        assert tracks == []
+
+    def test_search_tracks_with_expr_invalid_field_raises(self):
+        from mopidy.query import Compare
+
+        with self.assertRaises(LookupError), self.connection as c:
+            schema.search_tracks_with_expr(
+                c,
+                Compare("not_a_field", "eq", "x"),
+                10,
+                0,
+            )

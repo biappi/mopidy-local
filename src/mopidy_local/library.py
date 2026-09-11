@@ -29,6 +29,43 @@ def genre_ref(genre):
     return Ref.directory(uri=directory_uri(genre=genre), name=genre)
 
 
+def _track_with_fields(fields, values):
+    """Build the minimal track used to transport distinct field values."""
+    selected = dict(zip(fields, values, strict=True))
+    kwargs = {"uri": selected.get("uri", Uri("local:search"))}
+    for field in ("genre", "track_no", "disc_no", "date", "comment"):
+        if field in selected:
+            kwargs[field] = selected[field]
+    if "track_name" in selected:
+        kwargs["name"] = selected["track_name"]
+    if "musicbrainz_trackid" in selected:
+        kwargs["musicbrainz_id"] = selected["musicbrainz_trackid"]
+
+    if {"album", "albumartist", "musicbrainz_albumid"} & selected.keys():
+        album_kwargs = {}
+        if "album" in selected:
+            album_kwargs["name"] = selected["album"]
+        if "musicbrainz_albumid" in selected:
+            album_kwargs["musicbrainz_id"] = selected["musicbrainz_albumid"]
+        if selected.get("albumartist") is not None:
+            album_kwargs["artists"] = [
+                models.Artist(name=selected["albumartist"])
+            ]
+        kwargs["album"] = models.Album(**album_kwargs)
+
+    if {"artist", "musicbrainz_artistid"} & selected.keys():
+        artist_kwargs = {}
+        if "artist" in selected:
+            artist_kwargs["name"] = selected["artist"]
+        if "musicbrainz_artistid" in selected:
+            artist_kwargs["musicbrainz_id"] = selected["musicbrainz_artistid"]
+        kwargs["artists"] = [models.Artist(**artist_kwargs)]
+    for field in ("composer", "performer"):
+        if field in selected:
+            kwargs[f"{field}s"] = [models.Artist(name=selected[field])]
+    return models.Track(**kwargs)
+
+
 class LocalLibraryProvider(backend.LibraryProvider):
     ROOT_DIRECTORY_URI = Uri("local:directory")
 
@@ -100,6 +137,23 @@ class LocalLibraryProvider(backend.LibraryProvider):
             tracks = schema.search_tracks(c, q, limit, offset, exact, filters)
         uri = Uri(uritools.uricompose("local", path="search", query=q))
         return SearchResult(uri=uri, tracks=tuple(tracks))
+
+    def search_with_expr(
+        self, expr, uris=None, *, fields=None, limit=True, offset=0
+    ):
+        max_results = self._config["max_search_results"] if limit else None
+        filters = [f for uri in uris or [] for f in self._filters(uri) if f]
+        with self._connect() as c:
+            if fields is None:
+                tracks = schema.search_tracks_with_expr(
+                    c, expr, max_results, offset, filters
+                )
+            else:
+                rows = schema.search_distinct_with_expr(
+                    c, expr, fields, max_results, offset, filters
+                )
+                tracks = [_track_with_fields(fields, row) for row in rows]
+        return SearchResult(uri=Uri("local:search"), tracks=tuple(tracks))
 
     def get_images(self, uris):
         images = {}
